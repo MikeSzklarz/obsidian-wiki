@@ -167,7 +167,40 @@ Present a clear summary:
 - **Ready to ingest:** 12 new + 3 modified = 15 sources
 - **Up to date:** 27 sources unchanged
 - **Recommendation:** Append (delta is small relative to total)
+
+## Token Footprint (estimated)
+
+| Scope | Pages | ~Tokens |
+|---|---|---|
+| core tier | 12 | 18,400 |
+| supporting tier | 87 | 94,200 |
+| peripheral tier | 43 | 31,600 |
+| **Full wiki (all)** | **142** | **144,200** |
+
+Index-only pass (frontmatter + summaries): ~8,900 tokens
+Typical query (index + 5 full pages):      ~14,200 tokens
+
+⚠️  Full wiki exceeds 100K tokens. Consider:
+  - Demoting peripheral pages (promote tier suggestions from wiki-status insights mode)
+  - Running /wiki-lint --consolidate to merge near-duplicates
+  - Using wiki-query fast mode for most queries
 ```
+
+## Step 3b: Compute Token Footprint
+
+After building the status summary, compute the token footprint estimate:
+
+1. **Per-tier page sizes** — Glob all `.md` pages. Read the `tier:` frontmatter field of each (cheap grep). Group pages by tier value (`core`, `supporting`, `peripheral`; unset → `supporting`).
+
+2. **Estimate tokens** — For each page, estimate token count as `file_size_bytes / 4` (4 chars/token heuristic — no actual tokenizer needed). Sum per tier and total.
+
+3. **Index-only estimate** — Estimate the cost of an index-only pass: sum `len(title) + len(summary) + len(tags)` for each page frontmatter (~100 chars each on average), divided by 4.
+
+4. **Typical query estimate** — Index-only estimate + average full-read cost of 5 pages (`total_chars / total_pages * 5 / 4`).
+
+5. **Threshold check** — Read `WIKI_TOKEN_WARN_THRESHOLD` from config (default: `100000`). If `0`, skip the warning. If full-wiki token estimate exceeds the threshold, emit a `⚠️` warning with the three remediation suggestions shown in the template above.
+
+6. **Include in every standard status run** — both normal and insights mode. The methodology note (`4 chars/token heuristic`) appears as a footnote below the table.
 
 ## Step 4: What to Do Next
 

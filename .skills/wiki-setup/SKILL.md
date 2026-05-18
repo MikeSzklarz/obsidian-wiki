@@ -35,6 +35,11 @@ If `.env` doesn't exist, create it from `.env.example`. Ask the user for:
    - If unsure, skip for now — both skills fall back to `Grep` automatically.
    - Install instructions: see `.env.example` (QMD section).
 
+5. **Token budget warning threshold?** → `WIKI_TOKEN_WARN_THRESHOLD`
+   - Default: `100000` (warn when full-wiki read would cost > 100K tokens)
+   - Set to `0` to disable the warning entirely
+   - `wiki-status` shows a token footprint table and emits this warning automatically
+
 ## Step 2: Create Vault Directory Structure
 
 ```bash
