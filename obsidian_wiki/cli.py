@@ -349,6 +349,20 @@ def cmd_setup(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_graph_analyse(args: argparse.Namespace) -> int:
+    from obsidian_wiki.graph_analysis import analyse_vault
+    vault = Path(args.vault).expanduser().resolve()
+    if not vault.is_dir():
+        print(f"error: vault not found: {vault}", file=sys.stderr)
+        return 1
+    result = analyse_vault(vault, top_n=args.top)
+    if args.pretty:
+        print(json.dumps(result, indent=2))
+    else:
+        print(json.dumps(result))
+    return 0
+
+
 def cmd_cache_check(args: argparse.Namespace) -> int:
     from obsidian_wiki.cache import check_sources
     vault = Path(args.vault).expanduser().resolve()
@@ -454,6 +468,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     ip = sub.add_parser("info", help="show install paths, version, and config")
     ip.set_defaults(func=cmd_info)
+
+    ga = sub.add_parser(
+        "graph-analyse",
+        help="analyse the vault's wikilink graph: god nodes, communities, surprising connections",
+    )
+    ga.add_argument("vault", help="path to the Obsidian vault")
+    ga.add_argument("--top", type=int, default=20, help="number of top results to return (default: 20)")
+    ga.add_argument("--pretty", action="store_true", help="pretty-print JSON output")
+    ga.set_defaults(func=cmd_graph_analyse)
 
     cc = sub.add_parser(
         "cache-check",
