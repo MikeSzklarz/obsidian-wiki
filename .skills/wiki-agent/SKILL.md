@@ -34,7 +34,10 @@ If no query is given, default to **recent sessions mode**: ingest the last 5 unp
 
 ## Before You Start
 
-1. **Resolve config** — follow the Config Resolution Protocol in `llm-wiki/SKILL.md` (inline `@name` override → walk up CWD for `.env` → `~/.obsidian-wiki/config` → prompt setup). This gives `OBSIDIAN_VAULT_PATH`.
+**Writing profile:** Before drafting or rewriting natural-language Markdown, read and apply the `Writing Profile Resolution` section in `llm-wiki/SKILL.md`. Framework schema, provenance, safety, and operation-specific requirements take precedence.
+`WRITING.md` preferences apply only to newly drafted or rewritten natural-language Markdown; preserve source content and structured records.
+
+1. **Resolve config** — follow the Config Resolution Protocol in `llm-wiki/SKILL.md` (inline `@name` override → walk up CWD for `.env` → global config → prompt setup). This gives `OBSIDIAN_VAULT_PATH`.
 2. Read `$OBSIDIAN_VAULT_PATH/.manifest.json` → know what's already ingested.
 3. Read `$OBSIDIAN_VAULT_PATH/hot.md` if it exists → warm context on recent wiki activity.
 
@@ -116,7 +119,14 @@ If a query was given, score each session in the inventory without opening full s
 
 1. **Name/title match** — does the session name or thread title contain the query terms? Score: +3
 2. **CWD/project match** — does the working directory suggest the right project? Score: +2
-3. **Recency** — sessions from the last 90 days score higher than older ones. Score: +1 per 30-day recency bracket (max +3)
+3. **Recency** — apply exponential time decay with a 90-day half-life, as a multiplier on the match score rather than a bonus added to it:
+
+   ```
+   base  = name_match(3) + cwd_match(2)
+   score = base * (0.35 + 0.65 * 0.5 ** (age_days / 90))
+   ```
+
+   The 0.35 floor is deliberate: an old session that matches the query exactly must still outrank a recent one that barely matches, or the skill can never answer "how did I first solve this?". This is the same decay `session-brain` uses, so the two skills rank consistently.
 4. **Already ingested** — if this session was previously ingested and the wiki page already covers the query (check `hot.md` + `index.md`), flag as "covered" but still show in results
 
 Select the **top 3–5 sessions** by score. If no query was given, select the 5 most recent unprocessed sessions.
@@ -131,20 +141,20 @@ Open each selected session file and extract only the content relevant to the que
 
 **Claude** (JSONL conversation):
 - Each line: `{role, content, timestamp, ...}`
-- Search with: `grep -i "<query terms>" <session.jsonl>` to find the relevant lines
+- Search with: `rg -i "<query terms>" <session.jsonl>` to find the relevant lines
 - Extract: the surrounding conversation window (10 lines before + 20 lines after each hit)
 - Special signal: tool calls (Read/Write/Bash/Edit) reveal what was actually done — extract these even without keyword matches if they're in the relevant window
 
 **Codex** (rollout JSONL):
 - Each line: `{type: "session_meta|turn_context|event_msg|response_item", ...}`
 - Filter to `type: "event_msg"` (user turns) and `type: "response_item"` (model output)
-- Search with: `grep -i "<query terms>" <rollout.jsonl>`
+- Search with: `rg -i "<query terms>" <rollout.jsonl>`
 - Extract: matching turns + their parent context (the `turn_context` preceding the match)
 - Skip: `session_meta` events (operational metadata, not knowledge)
 
 **Hermes** (memory files + session JSONL):
 - For memory files: read the full file (they're short — typically <500 words each)
-- For session JSONL: `grep -i "<query terms>"` + surrounding window
+- For session JSONL: `rg -i "<query terms>"` + surrounding window
 - Memory files with title matches → read fully; others → grep only
 
 **OpenClaw** (MEMORY.md + daily notes + session JSONL):
@@ -160,7 +170,7 @@ Open each selected session file and extract only the content relevant to the que
 **Pi** (structured JSONL with tree layout):
 - Each line is a tree entry: `{type, id, parentId, timestamp, message?, ...}`
 - Build the active branch: map entries by `id`, find leaf (last entry with no children), walk `parentId` to root
-- Search with: `grep -i "<query terms>" <session.jsonl>` to find matching entries
+- Search with: `rg -i "<query terms>" <session.jsonl>` to find matching entries
 - Extract: the matching entries + their ancestors on the active branch (follow parent chain)
 - Special signal: `toolCall` blocks inside assistant messages reveal what was actually done — extract these even without keyword matches if they're in the relevant window
 - Prefer `compaction` and `branch_summary` entries when available — they're pre-synthesized summaries
@@ -245,12 +255,19 @@ Update `.manifest.json` for each session file processed:
 }
 ```
 
-Append to `log.md`:
-```
-- [TIMESTAMP] WIKI-AGENT agent=<agent> query="<query>" sessions_searched=N sessions_ingested=M pages_created=X pages_updated=Y
+One locked call updates the log, the index, and the hot cache:
+
+```bash
+obsidian-wiki memory sync WIKI-AGENT \
+  agent=<agent> query="<query>" \
+  sessions_searched=<N> sessions_ingested=<M> \
+  pages_created=<X> pages_updated=<Y> \
+  --takeaways "<one line: what was pulled in and what it changes>"
 ```
 
-Update `hot.md` with a one-line summary of what was ingested.
+Never hand-edit `index.md`, `log.md`, or `hot.md` — the command takes the lock that keeps a parallel writer from dropping your update.
+
+See `.skills/llm-wiki/references/MEMORY.md` for the full procedure.
 
 ---
 

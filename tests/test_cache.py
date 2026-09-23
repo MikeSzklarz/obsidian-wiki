@@ -1,5 +1,6 @@
 """Tests for the content-hash cache module."""
 import json
+import os
 import subprocess
 import sys
 import time
@@ -8,14 +9,18 @@ from pathlib import Path
 import pytest
 
 from obsidian_wiki.cache import (
+    ManifestLockTimeout,
     check_sources,
     compute_hash,
     hash_file,
+    manifest_lock,
     sha256_file,
     sha256_dir,
     update_source,
     _load_manifest,
+    _lock_path,
     _manifest_path,
+    _write_manifest,
 )
 
 
@@ -69,6 +74,20 @@ class TestHashing:
         assert len(compute_hash(src_file)) == 64  # hex SHA-256
         assert len(compute_hash(src_dir)) == 64
 
+    def test_sha256_dir_independent_of_path_separator(self, src_dir):
+        """Hash must match hashlib computed with POSIX separators regardless of platform (#178)."""
+        import hashlib
+
+        (src_dir / "sub").mkdir()
+        (src_dir / "sub" / "c.py").write_text("z = 3")
+
+        h = hashlib.sha256()
+        for fp in sorted(src_dir.rglob("*"), key=lambda p: p.relative_to(src_dir).as_posix()):
+            if fp.is_file():
+                h.update(fp.relative_to(src_dir).as_posix().encode())
+                h.update(sha256_file(fp).encode())
+        assert sha256_dir(src_dir) == h.hexdigest()
+
     def test_hash_file_alias(self, src_file):
         assert hash_file(src_file) == sha256_file(src_file)
 
@@ -104,7 +123,9 @@ class TestCheckSources:
 
     def test_empty_source_list(self, vault):
         result = check_sources(vault, [])
-        assert result == {"new": [], "modified": [], "unchanged": [], "missing": []}
+        assert result == {
+            "new": [], "modified": [], "unchanged": [], "missing": [], "unavailable": []
+        }
 
     def test_multiple_sources(self, vault, src_file, src_dir):
         update_source(vault, src_file)
@@ -118,6 +139,61 @@ class TestCheckSources:
         src_file.touch()
         result = check_sources(vault, [src_file])
         assert str(src_file) in result["unchanged"]
+
+    def _write_relative_manifest(self, vault, rel_key, content_hash):
+        """Write a manifest whose source key is stored vault-relative."""
+        _manifest_path(vault).write_text(
+            json.dumps(
+                {"sources": {rel_key: {"content_hash": content_hash, "last_ingested": "2026-07-14"}}}
+            ),
+            encoding="utf-8",
+        )
+
+    def test_relative_manifest_key_unchanged_for_abs_path(self, vault):
+        # Manifest stores a vault-relative key; caller passes the absolute path.
+        src = vault / "_raw" / "articles" / "foo.md"
+        src.parent.mkdir(parents=True)
+        src.write_text("body", encoding="utf-8")
+        self._write_relative_manifest(vault, "_raw/articles/foo.md", sha256_file(src))
+        result = check_sources(vault, [src])
+        assert str(src) in result["unchanged"]
+        assert result["new"] == []
+        assert result["missing"] == []
+
+    def test_relative_manifest_key_not_falsely_missing(self, vault):
+        # A relative key whose file exists under the vault must not be flagged missing,
+        # even when CWD != vault root.
+        src = vault / "_raw" / "articles" / "foo.md"
+        src.parent.mkdir(parents=True)
+        src.write_text("body", encoding="utf-8")
+        self._write_relative_manifest(vault, "_raw/articles/foo.md", sha256_file(src))
+        result = check_sources(vault, [])
+        assert "_raw/articles/foo.md" not in result["missing"]
+
+    def test_relative_manifest_key_modified(self, vault):
+        src = vault / "_raw" / "articles" / "foo.md"
+        src.parent.mkdir(parents=True)
+        src.write_text("body", encoding="utf-8")
+        self._write_relative_manifest(vault, "_raw/articles/foo.md", "stale-hash")
+        result = check_sources(vault, [src])
+        assert str(src) in result["modified"]
+
+    def test_relative_manifest_key_genuinely_missing(self, vault):
+        # A relative key whose top-level directory really is part of this vault
+        # is a vault-local loss when the file is gone.
+        (vault / "_raw" / "articles").mkdir(parents=True)
+        self._write_relative_manifest(vault, "_raw/articles/gone.md", "abc")
+        result = check_sources(vault, [])
+        assert "_raw/articles/gone.md" in result["missing"]
+
+    def test_relative_key_under_an_unknown_top_dir_is_unavailable(self, vault):
+        # A relative key whose first segment is not a vault entry is relative to
+        # some other root (a legacy ingest root, or an out-of-vault namespace), so
+        # it is unavailable here rather than a missing vault source.
+        self._write_relative_manifest(vault, "-Users-x/abc.jsonl", "abc")
+        result = check_sources(vault, [])
+        assert result["missing"] == []
+        assert "-Users-x/abc.jsonl" in result["unavailable"]
 
 
 # ---------------------------------------------------------------------------
@@ -165,10 +241,10 @@ class TestUpdateSource:
 # ---------------------------------------------------------------------------
 
 class TestCacheCLI:
-    def _run(self, *args):
+    def _run(self, *args, cwd=None):
         return subprocess.run(
             [sys.executable, "-m", "obsidian_wiki.cli", *args],
-            capture_output=True, text=True,
+            capture_output=True, text=True, cwd=cwd,
         )
 
     def test_cache_hash_file(self, src_file):
@@ -204,3 +280,167 @@ class TestCacheCLI:
         assert proc.returncode == 0
         sources = _load_manifest(vault)
         assert sources[str(src_file)]["pages_produced"] == ["concepts/foo.md", "entities/bar.md"]
+
+    def test_cache_update_non_portable_source_warns_on_stderr(self, vault, src_file):
+        # src_file lives outside the vault and $HOME, so the fallback absolute
+        # key is stored — but the CLI must say so rather than stay silent.
+        proc = self._run("cache-update", str(vault), str(src_file))
+        assert proc.returncode == 0
+        assert "no portable key" in proc.stderr
+
+    def test_cache_update_explicit_key_warns_nothing(self, vault, src_file):
+        proc = self._run("cache-update", str(vault), str(src_file), "--key", "repo:o/n")
+        assert proc.returncode == 0
+        assert "no portable key" not in proc.stderr
+        assert "repo:o/n" in _load_manifest(vault)
+
+
+class TestCacheCLIVaultRelativeSources:
+    """Relative source arguments must also resolve against the vault root.
+
+    The manifest stores vault-relative keys, and ``cache.resolve_key`` reads
+    them that way — so ``cache-update <vault> Raw/x.pdf`` has to work from any
+    CWD, not just when the shell happens to sit at the vault root.
+    """
+
+    @pytest.fixture
+    def vault(self, tmp_path):
+        v = tmp_path / "vault"
+        (v / "Raw" / "database").mkdir(parents=True)
+        (v / "Raw" / "database" / "x.pdf").write_bytes(b"pdf-bytes")
+        return v
+
+    def _run(self, *args, cwd=None):
+        return subprocess.run(
+            [sys.executable, "-m", "obsidian_wiki.cli", *args],
+            capture_output=True, text=True, cwd=cwd,
+        )
+
+    def test_cache_update_vault_relative_from_other_cwd(self, vault, tmp_path):
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        proc = self._run("cache-update", str(vault), "Raw/database/x.pdf",
+                         cwd=elsewhere)
+        assert proc.returncode == 0, proc.stderr
+        data = json.loads(proc.stdout)
+        assert data["key"] == "Raw/database/x.pdf"
+        assert "Raw/database/x.pdf" in json.dumps(_load_manifest(vault))
+
+    def test_cache_check_vault_relative_from_other_cwd(self, vault, tmp_path):
+        update_source(vault, vault / "Raw" / "database" / "x.pdf")
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        proc = self._run("cache-check", str(vault), "Raw/database/x.pdf",
+                         cwd=elsewhere)
+        assert proc.returncode == 0, proc.stderr
+        data = json.loads(proc.stdout)
+        assert str(vault / "Raw" / "database" / "x.pdf") in data["unchanged"]
+        assert data["missing"] == []
+
+    def test_cache_update_cwd_relative_still_wins(self, vault, tmp_path):
+        # Backward compat: an out-of-vault relative path resolves against the
+        # CWD as before, even when the vault contains a same-named file.
+        workdir = tmp_path / "workdir"
+        (workdir / "Raw" / "database").mkdir(parents=True)
+        (workdir / "Raw" / "database" / "x.pdf").write_bytes(b"different-bytes")
+        proc = self._run("cache-update", str(vault), "Raw/database/x.pdf",
+                         cwd=workdir)
+        assert proc.returncode == 0, proc.stderr
+        data = json.loads(proc.stdout)
+        assert data["path"] == str(workdir / "Raw" / "database" / "x.pdf")
+        # The typed string is byte-for-byte a manifest key, yet the vault file
+        # it names is not the one hashed — say so rather than choosing silently.
+        assert (f"note: Raw/database/x.pdf matched both "
+                f"{workdir / 'Raw' / 'database' / 'x.pdf'} and "
+                f"{vault / 'Raw' / 'database' / 'x.pdf'}") in proc.stderr
+
+    def test_cache_update_missing_source_clean_error(self, vault, tmp_path):
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        proc = self._run("cache-update", str(vault), "Raw/absent.md", cwd=elsewhere)
+        assert proc.returncode == 1
+        assert "Traceback" not in proc.stderr
+        assert str(elsewhere / "Raw" / "absent.md") in proc.stderr
+        assert str(vault / "Raw" / "absent.md") in proc.stderr
+
+    def test_cache_update_absolute_missing_clean_error(self, vault):
+        proc = self._run("cache-update", str(vault), str(vault / "Raw" / "gone.pdf"))
+        assert proc.returncode == 1
+        assert "Traceback" not in proc.stderr
+        assert str(vault / "Raw" / "gone.pdf") in proc.stderr
+
+
+class TestManifestLock:
+    """Concurrent writers must serialize instead of clobbering the manifest."""
+
+    def test_lock_is_released_after_use(self, vault):
+        with manifest_lock(vault):
+            assert _lock_path(vault).exists()
+        assert not _lock_path(vault).exists()
+
+    def test_second_holder_times_out(self, vault):
+        with manifest_lock(vault):
+            with pytest.raises(ManifestLockTimeout):
+                with manifest_lock(vault, timeout=0.3):
+                    pass
+
+    def test_stale_lock_is_stolen(self, vault):
+        lock = _lock_path(vault)
+        lock.write_text("999999")
+        old = time.time() - 120
+        os.utime(lock, (old, old))
+        with manifest_lock(vault, timeout=0.5, stale_after=60.0):
+            pass
+        assert not lock.exists()
+
+    def test_lock_released_when_body_raises(self, vault):
+        with pytest.raises(ValueError):
+            with manifest_lock(vault):
+                raise ValueError("boom")
+        assert not _lock_path(vault).exists()
+
+    def test_update_source_leaves_no_lock_behind(self, vault, src_file):
+        update_source(vault, src_file)
+        assert not _lock_path(vault).exists()
+
+    def test_concurrent_updates_both_survive(self, vault, tmp_path):
+        """The race the lock exists for: two processes, neither entry lost."""
+        a = tmp_path / "a.md"
+        a.write_text("alpha", encoding="utf-8")
+        b = tmp_path / "b.md"
+        b.write_text("beta", encoding="utf-8")
+        code = (
+            "import sys;from pathlib import Path;"
+            "from obsidian_wiki.cache import update_source;"
+            "update_source(Path(sys.argv[1]), Path(sys.argv[2]))"
+        )
+        env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parent.parent)}
+        procs = [
+            subprocess.Popen([sys.executable, "-c", code, str(vault), str(src)], env=env)
+            for src in (a, b)
+        ]
+        for p in procs:
+            assert p.wait(timeout=30) == 0
+        sources = _load_manifest(vault)
+        assert str(a) in sources and str(b) in sources
+
+
+class TestAtomicWrite:
+    def test_failed_write_leaves_original_intact(self, vault, monkeypatch):
+        _write_manifest(vault, {"sources": {"kept": {"content_hash": "abc"}}})
+
+        def boom(*args, **kwargs):
+            raise OSError("disk full")
+
+        monkeypatch.setattr("obsidian_wiki.cache.os.replace", boom)
+        with pytest.raises(OSError):
+            _write_manifest(vault, {"sources": {"lost": {}}})
+
+        assert _load_manifest(vault) == {"kept": {"content_hash": "abc"}}
+        leftovers = list(vault.glob(".manifest.json.*.tmp"))
+        assert leftovers == []
+
+    def test_manifest_is_never_partially_written(self, vault, src_file):
+        update_source(vault, src_file)
+        # A complete, parseable JSON document — never a truncated prefix.
+        json.loads(_manifest_path(vault).read_text(encoding="utf-8"))

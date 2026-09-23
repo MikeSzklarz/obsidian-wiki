@@ -8,7 +8,7 @@ This project is a **skill-based framework** for building and maintaining an Obsi
 
 ## Quick Orientation
 
-1. Resolve config via `AGENTS.md`: honor an inline `@name` vault override first, then `.env`, then `~/.obsidian-wiki/config`. This gives `OBSIDIAN_VAULT_PATH` — where the wiki lives.
+1. Resolve config via `AGENTS.md`: honor an inline `@name` vault override first, then `.env`, then the global config (`~/.config/obsidian-wiki/config`, XDG-style; legacy `~/.obsidian-wiki/config` still honored). This gives `OBSIDIAN_VAULT_PATH` — where the wiki lives.
 2. Read `.manifest.json` at the vault root to see what's already been ingested.
 3. Skills are in `.skills/` (also at `.kiro/skills/`). Each subfolder has a `SKILL.md`.
 
@@ -25,6 +25,7 @@ This project is a **skill-based framework** for building and maintaining an Obsi
 | "import my Pi history" | `pi-history-ingest` |
 | "what's the status" / "show the delta" | `wiki-status` |
 | "what do I know about X" | `wiki-query` |
+| "use my vault as context" / "context pack for X" / "bounded context" | `wiki-context-pack` |
 | "audit" / "lint" / "find broken links" | `wiki-lint` |
 | "rebuild" / "archive" / "restore" | `wiki-rebuild` |
 | "link my pages" / "cross-reference" | `cross-linker` |

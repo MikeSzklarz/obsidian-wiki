@@ -16,7 +16,10 @@ This skill can be invoked directly or via the `wiki-history-ingest` router (`/wi
 
 ## Before You Start
 
-1. **Resolve config** — follow the Config Resolution Protocol in `llm-wiki/SKILL.md` (inline `@name` override → walk up CWD for `.env` → `~/.obsidian-wiki/config` → prompt setup). This gives `OBSIDIAN_VAULT_PATH` and `CLAUDE_HISTORY_PATH` (defaults to `~/.claude`)
+**Writing profile:** Before drafting or rewriting natural-language Markdown, read and apply the `Writing Profile Resolution` section in `llm-wiki/SKILL.md`. Framework schema, provenance, safety, and operation-specific requirements take precedence.
+`WRITING.md` preferences apply only to newly drafted or rewritten natural-language Markdown; preserve source content and structured records.
+
+1. **Resolve config** — follow the Config Resolution Protocol in `llm-wiki/SKILL.md` (inline `@name` override → walk up CWD for `.env` → global config → prompt setup). This gives `OBSIDIAN_VAULT_PATH` and `CLAUDE_HISTORY_PATH` (defaults to `~/.claude`)
 2. Read `.manifest.json` at the vault root to check what's already been ingested
 3. Read `index.md` at the vault root to know what the wiki already contains
 4. **Project Scoping** — read `WIKI_SKIP_PROJECTS` from config (comma-separated substrings). Exclude any project directory whose name contains one of them from **every** step below (scan, delta, sampling, manifest writes). If the user names extra projects to skip this run, add them. Apply the exclusion **once, uniformly** — don't hand-write `grep -v` filters into individual commands, which drifts between the scan and manifest steps.
@@ -32,17 +35,17 @@ Check `.manifest.json` for each source file (conversation JSONL, memory file). O
 
 This is usually what you want — the user ran a few new sessions and wants to capture the delta.
 
-> **Canonical paths when comparing.** The manifest keys are absolute paths with `~` expanded (see `llm-wiki/SKILL.md` → `.manifest.json`). Before deciding a file is "new", expand its path the same way — otherwise a file already tracked as `~/.claude/...` looks new when you scanned it as `/Users/me/.claude/...` (or vice-versa) and gets re-ingested. The `scripts/manifest.py` helper does this for you:
+> **Portable keys when comparing.** Manifest keys follow the source key contract (v2) in `llm-wiki/SKILL.md` → `.manifest.json`. A session under `$HOME` is keyed `~`-relative (`~/.claude/projects/.../abc.jsonl`), never by the expanded machine path; vault-relative and pseudo-keys are the other two forms. Before deciding a file is "new", resolve the stored key the same way the tool does (expand `~`/env vars, resolve vault-relative against the vault root) — otherwise an already-tracked file looks new and gets re-ingested. The `scripts/manifest.py` helper does this for you:
 >
 > ```bash
-> # New/modified sources, honoring WIKI_SKIP_PROJECTS + --skip, paths already canonical:
+> # New/modified sources, honoring WIKI_SKIP_PROJECTS + --skip:
 > python3 "$OBSIDIAN_WIKI_REPO/scripts/manifest.py" delta "$OBSIDIAN_VAULT_PATH" \
 >   --scan "$CLAUDE_HISTORY_PATH/projects/*/memory/*.md"
-> # One-time repair if the manifest already mixes ~ and absolute keys:
-> python3 "$OBSIDIAN_WIKI_REPO/scripts/manifest.py" normalize "$OBSIDIAN_VAULT_PATH" --dry-run
+> # One-time repair if the manifest still holds legacy absolute keys:
+> python3 "$OBSIDIAN_WIKI_REPO/scripts/manifest.py" migrate "$OBSIDIAN_VAULT_PATH" --dry-run
 > ```
 >
-> The helper is optional — if it's unavailable, do the same expansion inline before every manifest lookup and write.
+> The helper is optional — if it's unavailable, apply the same resolution inline before every manifest lookup and write.
 
 ### Pre-extraction (recommended — run before ingest)
 
@@ -405,13 +408,24 @@ Also update the `projects` section of the manifest:
 
 ### Create journal entry + update special files
 
-Update `index.md` and `log.md` per the standard process:
+Update `index.md`, `log.md`, and `hot.md` with one locked call:
 
-```
-- [TIMESTAMP] CLAUDE_HISTORY_INGEST projects=N conversations=M desktop_sessions=D audit_logs=A pages_updated=X pages_created=Y mode=append|full
+```bash
+obsidian-wiki memory sync CLAUDE_HISTORY_INGEST \
+  projects=<projects> conversations=<conversations> \
+  desktop_sessions=<desktop_sessions> audit_logs=<audit_logs> \
+  pages_updated=<pages_updated> pages_created=<pages_created> \
+  mode=<mode> \
+  --takeaways "Ingested 5 Claude conversations across 2 projects; surfaced patterns in API design and testing strategy."
 ```
 
-**`hot.md`** — Read `$OBSIDIAN_VAULT_PATH/hot.md` (create from the template in `wiki-ingest` if missing). Update **Recent Activity** with a one-line summary — e.g. "Ingested 5 Claude conversations across 2 projects; surfaced patterns in API design and testing strategy." Keep the last 3 operations. Update **Active Threads** if any ongoing project is now better understood. **Update the `updated:` field in the frontmatter** to the current timestamp — this is easy to forget; the body edit and the frontmatter bump must both happen.
+Never hand-edit `index.md`, `log.md`, or `hot.md` — the command takes the lock that keeps a parallel writer from dropping your update. `--takeaways` is the one-line conceptual summary that used to go in Recent Activity;
+omit it to leave the previous takeaways untouched.
+
+If an ongoing project is now better understood, record the thread so the next
+session picks it up: `obsidian-wiki memory todo add "<thread>" --origin projects/<name>.md`.
+
+See `.skills/llm-wiki/references/MEMORY.md` for the full procedure.
 
 ## Privacy
 

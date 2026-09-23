@@ -2,20 +2,26 @@
 
 A **skill-based framework** for building and maintaining an Obsidian knowledge base. No scripts or dependencies — everything is markdown instructions that you execute directly.
 
+## README Translation Parity
+
+`README.md` and `README_TW.md` are one documentation surface. Keep headings, examples, links, and user-facing behavior aligned between the two translations. The check is advisory and never blocks a PR: the `readme-translation-drift` CI job only reports drift. Run `python tools/check_readme_sync.py` to list commits that changed `README.md` without a later `README_TW.md` update, along with the pending English diff — then translate and backfill those changes into `README_TW.md`. Reviewers assess translation quality.
+
 ## Configuration
 
 Resolve config using the Config Resolution Protocol in `llm-wiki/SKILL.md`:
 
-0. **Inline vault override (`@name`)** — if the request contains an `@<name>` token, resolve `~/.obsidian-wiki/config.<name>` directly, overriding the steps below. See "Targeting a specific vault" right after this list.
+0. **Inline vault override (`@name`)** — if the request contains an `@<name>` token, resolve `<global config dir>/config.<name>` directly, overriding the steps below. See "Targeting a specific vault" right after this list.
 1. **Walk up from CWD** — look for a `.env` file in the current directory, then each parent, up to `$HOME`. Stop at the first `.env` that contains `OBSIDIAN_VAULT_PATH`.
-2. **Global config** — if no local `.env` is found, read `~/.obsidian-wiki/config`.
+2. **Global config** — if no local `.env` is found, read `<global config dir>/config`.
 3. **Prompt setup** — if neither exists, tell the user to run `wiki-setup`.
+
+The **global config dir** is XDG-style: `$XDG_CONFIG_HOME/obsidian-wiki` (default `~/.config/obsidian-wiki`). Installs that already have a `~/.obsidian-wiki` directory keep using it, so existing setups never break; new installs use the XDG path.
 
 The resolved config sets `OBSIDIAN_VAULT_PATH` (where the wiki lives). It may also set `OBSIDIAN_WIKI_REPO` (where this repo is cloned) and other optional variables.
 
 ### Targeting a specific vault
 
-You can maintain multiple vaults (each a `~/.obsidian-wiki/config.<name>` file managed by `wiki-switch`) and reach any of them from any directory:
+You can maintain multiple vaults (each a `<global config dir>/config.<name>` file managed by `wiki-switch`) and reach any of them from any directory:
 
 - **`@name` (per-invocation override)** — prefix or mention `@<name>` anywhere in a request to route that one command to that vault, e.g. `@work save this` or `wiki-query @personal what do I know about X`. It overrides the CWD `.env` and the active symlink **for that invocation only** — it does **not** flip your default vault. If `config.<name>` doesn't exist, the skill reports it and lists available vaults; do **not** silently fall back to the default. The `@name` is stripped before the rest of the request is used as content.
 - **`/wiki-switch <name>` (persistent default)** — re-points the active symlink so all future requests use that vault. This is your default "brain" vault; use `@name` to dip into the other one without switching.
@@ -28,13 +34,16 @@ You can maintain multiple vaults (each a `~/.obsidian-wiki/config.<name>` file m
 $OBSIDIAN_VAULT_PATH/
 ├── index.md                # Master index — every page listed, always kept current
 ├── log.md                  # Chronological activity log (ingests, updates, lints)
-├── hot.md                  # Session hot cache — ~500-word semantic snapshot of recent activity
+├── hot.md                  # Session hot cache — ~500-word semantic snapshot (generated)
 ├── .manifest.json          # Tracks every ingested source: path, timestamps, pages produced
 ├── _meta/
 │   ├── taxonomy.md         # Controlled tag vocabulary
+│   ├── profile.md          # Durable facts about the vault owner (memory skill)
+│   ├── todos.md            # Open threads carried between sessions (memory skill)
 │   └── *.base              # Obsidian Bases dashboard definitions (wiki-dashboard skill)
 ├── _insights.md            # Graph analysis output (hubs, bridges, dead ends)
 ├── _raw/                   # Staging area — drop rough notes here, next ingest promotes them
+├── _readouts/              # Derived narrative readouts saved by wiki-narrate — not knowledge pages
 ├── concepts/               # Abstract ideas, patterns, mental models
 ├── entities/               # Concrete things — people, tools, libraries, companies
 ├── skills/                 # How-to knowledge, techniques, procedures
@@ -54,7 +63,7 @@ Skills live in `.skills/<name>/SKILL.md`. Match the user's intent to the right s
 | User says something like… | Skill |
 |---|---|
 | "set up my wiki" / "initialize" | `wiki-setup` |
-| "/wiki-history-ingest claude" / "/wiki-history-ingest codex" / "/wiki-history-ingest hermes" / "/wiki-history-ingest pi" | `wiki-history-ingest` |
+| "/wiki-history-ingest claude" / "/wiki-history-ingest copilot" / "/wiki-history-ingest codex" / "/wiki-history-ingest hermes" / "/wiki-history-ingest openclaw" / "/wiki-history-ingest pi" | `wiki-history-ingest` |
 | "ingest" / "add this to the wiki" / "process these docs" / "process this export" / "ingest this data" / logs, transcripts / "/ingest-url <url>" / "add this URL" / "ingest this link" / "save this page" | `wiki-ingest` |
 | "import my Claude history" / "mine my conversations" | `claude-history-ingest` |
 | "import my Codex history" / "mine my Codex sessions" | `codex-history-ingest` |
@@ -64,7 +73,10 @@ Skills live in `.skills/<name>/SKILL.md`. Match the user's intent to the right s
 | "import my Pi history" / "mine my Pi sessions" / "ingest ~/.pi" | `pi-history-ingest` |
 | "what's the status" / "what's been ingested" / "show the delta" | `wiki-status` |
 | "wiki insights" / "hubs" / "wiki structure" | `wiki-status` (insights mode) |
+| "is my vault at equilibrium" / "wiki equilibrium" / "is maintenance done" / "are my skills fighting" | `wiki-status` (equilibrium mode) |
 | "what do I know about X" / "find info on Y" / any question | `wiki-query` |
+| "use my vault as context" / "context pack for X" / "bounded context" | `wiki-context-pack` |
+| "narrate" / "briefing" / "explain this topic" / "/wiki-narrate" | `wiki-narrate` |
 | "audit" / "lint" / "find broken links" / "wiki health" | `wiki-lint` |
 | "dedup my wiki" / "find duplicate pages" / "merge duplicates" / "identity resolution" / "consolidate my wiki" | `wiki-dedup` |
 | "rebuild" / "start over" / "archive" / "restore" | `wiki-rebuild` |
@@ -83,14 +95,29 @@ Skills live in `.skills/<name>/SKILL.md`. Match the user's intent to the right s
 | "/vault-skill-factory" / "make a skill from my wiki" / "turn these pages into a skill" / "package my notes on X as a skill" / "build a domain-expert skill from my vault" | `vault-skill-factory` |
 | "/wiki-claude [topic]" / "/wiki-codex [topic]" / "/wiki-hermes [topic]" / "/wiki-openclaw [topic]" / "/wiki-copilot [topic]" / "/wiki-pi [topic]" | `wiki-agent` |
 | "/memory-bridge" / "browse codex memory" / "what did codex know about X" / "compare tool memories" / "cross-tool memory" | `memory-bridge` |
+| "/session-brain" / "build my session map" / "cluster my claude sessions" / "rebuild the session graph" / "what topics have gone stale" | `session-brain` |
+| "/wiki-sessions [topic]" / "which session did I do X in" / "find the session about X" / "when did I last work on X" / "have I done this before" | `session-search` |
 | "/daily-update" / "morning sync" / "refresh the wiki index" / "set up the daily cron" / "install terminal notification" | `daily-update` |
 | "/impl-validator" / "check this implementation" / "validate what you did" / "is this correct?" | `impl-validator` |
 | "/wiki-switch NAME" / "switch to my work wiki" / "switch vault" / "change wiki" / "list my wikis" / "show my vaults" / "create a new vault config" | `wiki-switch` |
 | "/wiki-digest" / "what did I learn this week" / "weekly digest" / "knowledge summary" / "what's new in my wiki" / "summarize my recent learning" / "monthly review" | `wiki-digest` |
+| "/wiki-context-pack" / "make a context pack" / "context slice for X" / "pack the wiki for my agent" / "bounded context for Y" | `wiki-context-pack` |
+| "/wiki-stage-commit" / "review staged pages" / "commit staged writes" / "promote staged pages" / "what's waiting in staging" | `wiki-stage-commit` |
+| "restyle Obsidian" / "adjust the vault layout" / "CSS snippet" / "tune tabs/sidebars/graph panes" | `obsidian-layout-adjustment` |
+
+### Session history: ingest vs. retrieve
+
+Three skills read agent session caches, and they are not interchangeable:
+
+- `wiki-history-ingest` (and its per-agent variants) **ingests** — distils sessions into permanent vault pages.
+- `wiki-agent` **ingests a slice** — finds sessions about one topic in another agent's history and pulls them into the vault.
+- `session-brain` / `session-search` **retrieve** — build a topic graph over the raw sessions and find or load one. They write a sidecar at `~/.claude/session-brain/` and never touch the vault.
+
+If the user wants knowledge preserved, ingest. If they want to find the session where something happened, retrieve.
 
 ## Cross-Project Usage
 
-The main use case: you're working in some other project and want to sync knowledge into your wiki or query it. Two global skills handle this — `wiki-update` and `wiki-query`. They work from any directory.
+The main use case: you're working in some other project and want to sync knowledge into your wiki, query it, or compile bounded context. Three portable skills handle this — `wiki-update`, `wiki-query`, and `wiki-context-pack`. They work from any directory.
 
 ### wiki-update (write to wiki)
 
@@ -108,6 +135,13 @@ On repeat runs, it checks `last_commit_synced` in `.manifest.json` and only proc
 2. Scan titles, tags, and `summary:` frontmatter fields first (cheap pass)
 3. Only open page bodies when the index pass can't answer
 4. Return a synthesized answer with `[[wikilink]]` citations
+
+### wiki-context-pack (read-only context)
+
+1. Resolve the target vault and read its owner `AGENTS.md`
+2. Rank existing notes without requiring schema migration
+3. Compile summaries and selected excerpts within a hard token budget
+4. Return a provenance-rich pack; never write it back to the vault
 
 ## Visibility Tags (optional)
 
@@ -134,9 +168,12 @@ See `wiki-query` and `wiki-export` skills for how the filter is applied.
 - **Frontmatter is required.** Every wiki page needs: `title`, `category`, `tags`, `sources`, `created`, `updated`.
 - **Single source of truth.** Visibility tags shape how content is surfaced — they don't duplicate or separate it.
 - **Keep context warm.** `hot.md` is a ~500-word semantic snapshot of recent activity. Every write skill updates it so the next session can pick up where the last one left off without crawling the full vault.
+- **Write memory through the CLI.** `index.md`, `log.md`, `hot.md`, `_meta/profile.md`, and `_meta/todos.md` are maintained by `obsidian-wiki memory`, which locks and writes atomically. Call `obsidian-wiki memory sync --verb <VERB> --field k=v` after a write operation instead of editing those files by hand — hand edits in a parallel run drop whichever write lands second. The one exception is `## Key Takeaways` in `hot.md`, which is yours: pass it with `memory hot --takeaways`.
 
 ## Architecture Reference
 
 For the full pattern (three-layer architecture, page templates, project org), read `.skills/llm-wiki/SKILL.md`.
+
+Human-facing documentation lives in `docs/` — `installation.md`, `agents.md`, `skills.md`, `cli.md`, `configuration.md`, `architecture.md`, `session-brain.md`, `contributing.md`. `README.md` is a landing page only; when you add a skill, CLI command, or config variable, update the matching `docs/` page rather than the README.
 
 The vault format is structurally conformant with the [Open Knowledge Format (OKF) v0.1](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md) — markdown files with YAML frontmatter, category subfolders, reserved `index.md`/`log.md`. `wiki-export` (OKF mode) and `wiki-import` are the bridge: they translate between our native frontmatter (`title`/`category`/`tags`/`sources`/`created`/`updated` + `summary`) and OKF (`type`/`title`/`description`/`resource`/`tags`/`timestamp`), making vaults exchangeable with any OKF tool. The OKF round-trip is lossless; the `graph.json` round-trip is not.

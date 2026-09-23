@@ -6,7 +6,9 @@
 #
 # What it does:
 #   1. Creates .env from .env.example (if not present)
-#   2. Writes ~/.obsidian-wiki/config so skills work from any project
+#   2. Writes the global config (XDG-style, under ~/.config/obsidian-wiki by
+#      default; legacy ~/.obsidian-wiki is honored if it already exists) so
+#      skills work from any project
 #   3. Symlinks .skills/* into each agent's expected skills directory:
 #      Project-local:
 #        - .claude/skills/        (Claude Code)
@@ -111,10 +113,24 @@ else
   echo "✅  .env already exists"
 fi
 
-# ── Step 1b: ~/.obsidian-wiki/config ─────────────────────────
-GLOBAL_CONFIG_DIR="$HOME/.obsidian-wiki"
+# ── Step 1b: global config ────────────────────────────────────
+# XDG-style location by default; installs that already have the legacy
+# ~/.obsidian-wiki keep using it so upgrading doesn't strand a working config.
+XDG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/obsidian-wiki"
+LEGACY_DIR="$HOME/.obsidian-wiki"
+if [ -d "$LEGACY_DIR" ] && [ ! -e "$XDG_DIR" ]; then
+  GLOBAL_CONFIG_DIR="$LEGACY_DIR"
+else
+  GLOBAL_CONFIG_DIR="$XDG_DIR"
+fi
 GLOBAL_CONFIG="$GLOBAL_CONFIG_DIR/config"
 mkdir -p "$GLOBAL_CONFIG_DIR"
+
+WRITING_PROFILE="$GLOBAL_CONFIG_DIR/WRITING.md"
+WRITING_TEMPLATE="$SKILLS_DIR/llm-wiki/references/WRITING.md"
+if [ ! -e "$WRITING_PROFILE" ]; then
+  cp "$WRITING_TEMPLATE" "$WRITING_PROFILE"
+fi
 
 # Read vault path from .env if it's already set
 VAULT_PATH=""
@@ -141,7 +157,7 @@ cat > "$GLOBAL_CONFIG" <<EOF
 OBSIDIAN_VAULT_PATH="$VAULT_PATH"
 OBSIDIAN_WIKI_REPO="$SCRIPT_DIR"
 EOF
-echo "✅  Global config written to ~/.obsidian-wiki/config"
+echo "✅  Global config written to $GLOBAL_CONFIG"
 
 # ── Step 1c: Bootstrap symlinks ──────────────────────────────
 # .hermes.md → AGENTS.md  (Hermes resolves .hermes.md before AGENTS.md;
@@ -173,8 +189,8 @@ for agent_dir in "${AGENT_DIRS[@]}"; do
 done
 
 # ── Step 3: Install global skills ────────────────────────────
-# ~/.claude/skills gets only the two portable skills (usable from any project).
-install_skills "$HOME/.claude/skills" "~/.claude/skills/ (wiki-update, wiki-query)" absolute wiki-update wiki-query
+# ~/.claude/skills gets only the portable skills (usable from any project).
+install_skills "$HOME/.claude/skills" "~/.claude/skills/ (portable wiki skills)" absolute wiki-update wiki-query wiki-context-pack
 
 # Steps 3b–3j: Install all skills for every supported agent.
 # OpenClaw discovers skills from ~/.agents/skills/ (per docs.openclaw.ai/skills);
@@ -211,86 +227,64 @@ install_skills "$HOME/.pi/agent/skills"           "~/.pi/agent/skills/ (Pi)"
 install_skills "$HOME/.agents/skills"             "~/.agents/skills/ (OpenCode, Aider, Droid, generic)"
 
 # ── Step 4: GitHub sync (optional) ───────────────────────────
+# Delegates to obsidian_wiki/sync.py — the same module `obsidian-wiki
+# setup`/`sync-setup` (pip/uv installs) use — so this flow can't drift out of
+# sync with the Python CLI again (see #153). Always runs the CLI straight out
+# of this checkout via PYTHONPATH rather than trusting a possibly-older
+# `obsidian-wiki` already on PATH (which may predate this subcommand); falls
+# back to that installed binary only if python3 isn't available at all.
 SYNC_CONFIGURED=false
 VAULT_REMOTE=""
+
+run_owiki() {
+  if command -v python3 &>/dev/null; then
+    PYTHONPATH="$SCRIPT_DIR" python3 -m obsidian_wiki.cli "$@"
+  elif command -v obsidian-wiki &>/dev/null; then
+    obsidian-wiki "$@"
+  else
+    echo "⚠️  Skipping GitHub sync setup — neither 'python3' nor 'obsidian-wiki' found on PATH." >&2
+    return 1
+  fi
+}
 
 echo ""
 read -p "  Set up GitHub sync for your vault? [y/N]: " SETUP_SYNC || true
 if [[ "$SETUP_SYNC" =~ ^[Yy]$ ]]; then
   read -p "  GitHub repo URL (e.g. https://github.com/you/my-wiki.git): " VAULT_REMOTE || true
   if [ -n "$VAULT_REMOTE" ] && [ -n "$VAULT_PATH" ] && [ -d "$VAULT_PATH" ]; then
-    # Init git repo in vault if needed
-    if [ ! -d "$VAULT_PATH/.git" ]; then
-      git -C "$VAULT_PATH" init -q
-      echo "✅  Initialized git repo in vault"
-    fi
-    # Create .gitignore if missing
-    if [ ! -f "$VAULT_PATH/.gitignore" ]; then
-      cat > "$VAULT_PATH/.gitignore" <<'GITIGNORE'
-.obsidian/workspace.json
-.obsidian/workspace-mobile.json
-.obsidian/cache
-.trash/
-GITIGNORE
-      echo "✅  Created .gitignore in vault"
-    fi
-    # Add or update remote
-    if git -C "$VAULT_PATH" remote get-url origin &>/dev/null 2>&1; then
-      git -C "$VAULT_PATH" remote set-url origin "$VAULT_REMOTE"
-    else
-      git -C "$VAULT_PATH" remote add origin "$VAULT_REMOTE"
-    fi
-    echo "✅  Git remote → $VAULT_REMOTE"
-    # Persist remote in global config
-    echo "VAULT_GITHUB_REMOTE=\"$VAULT_REMOTE\"" >> "$GLOBAL_CONFIG"
-    # Write ~/.obsidian-wiki/sync.sh
-    cat > "$GLOBAL_CONFIG_DIR/sync.sh" <<'SYNC_SCRIPT'
-#!/bin/bash
-# wiki-sync — commit and push vault changes to GitHub
-set -e
-# shellcheck source=/dev/null
-source "$HOME/.obsidian-wiki/config" 2>/dev/null || true
-VAULT="${OBSIDIAN_VAULT_PATH:-}"
-[ -d "$VAULT" ] || { echo "wiki-sync: vault not found at '$VAULT'" >&2; exit 1; }
-cd "$VAULT"
-git add -A
-if git diff --cached --quiet; then
-  echo "wiki-sync: nothing to commit"
-  exit 0
-fi
-git commit -m "sync $(date '+%Y-%m-%d %H:%M')"
-git push
-echo "wiki-sync: pushed to $(git remote get-url origin)"
-SYNC_SCRIPT
-    chmod +x "$GLOBAL_CONFIG_DIR/sync.sh"
-    echo "✅  Wrote ~/.obsidian-wiki/sync.sh"
-    SYNC_CONFIGURED=true
+    if run_owiki sync-setup "$VAULT_REMOTE" --vault "$VAULT_PATH"; then
+      SYNC_CONFIGURED=true
 
-    # Offer shell alias
-    echo ""
-    read -p "  Add 'wiki-sync' alias to your shell? [Y/n]: " ADD_ALIAS || true
-    if [[ ! "$ADD_ALIAS" =~ ^[Nn]$ ]]; then
-      SHELL_RC=""
-      [ -f "$HOME/.zshrc" ]  && SHELL_RC="$HOME/.zshrc"
-      [ -z "$SHELL_RC" ] && [ -f "$HOME/.bashrc" ] && SHELL_RC="$HOME/.bashrc"
-      if [ -n "$SHELL_RC" ]; then
-        if ! grep -q "wiki-sync" "$SHELL_RC"; then
-          printf '\n# wiki-sync — push Obsidian vault to GitHub\nalias wiki-sync='"'"'~/.obsidian-wiki/sync.sh'"'"'\n' >> "$SHELL_RC"
-          echo "✅  Added wiki-sync alias to $SHELL_RC"
-          echo "    → Run: source $SHELL_RC  (or open a new terminal)"
-        else
-          echo "    ℹ️  wiki-sync alias already in $SHELL_RC"
+      # Offer shell alias
+      echo ""
+      read -p "  Add 'wiki-sync' alias to your shell? [Y/n]: " ADD_ALIAS || true
+      if [[ ! "$ADD_ALIAS" =~ ^[Nn]$ ]]; then
+        SHELL_RC=""
+        [ -f "$HOME/.zshrc" ]  && SHELL_RC="$HOME/.zshrc"
+        [ -z "$SHELL_RC" ] && [ -f "$HOME/.bashrc" ] && SHELL_RC="$HOME/.bashrc"
+        if [ -n "$SHELL_RC" ]; then
+          if ! grep -q "wiki-sync" "$SHELL_RC"; then
+            printf '\n# wiki-sync — push Obsidian vault to GitHub\nalias wiki-sync='"'"'obsidian-wiki sync'"'"'\n' >> "$SHELL_RC"
+            echo "✅  Added wiki-sync alias to $SHELL_RC"
+            echo "    → Run: source $SHELL_RC  (or open a new terminal)"
+          else
+            echo "    ℹ️  wiki-sync alias already in $SHELL_RC"
+          fi
         fi
       fi
-    fi
 
-    # Offer hourly cron
-    echo ""
-    read -p "  Enable hourly auto-sync (cron)? [y/N]: " ADD_CRON || true
-    if [[ "$ADD_CRON" =~ ^[Yy]$ ]]; then
-      CRON_LINE="0 * * * * $GLOBAL_CONFIG_DIR/sync.sh >> $GLOBAL_CONFIG_DIR/sync.log 2>&1"
-      ( crontab -l 2>/dev/null; echo "$CRON_LINE" ) | sort -u | crontab -
-      echo "✅  Hourly cron installed  (logs: ~/.obsidian-wiki/sync.log)"
+      # Offer hourly cron
+      echo ""
+      read -p "  Enable hourly auto-sync (cron)? [y/N]: " ADD_CRON || true
+      if [[ "$ADD_CRON" =~ ^[Yy]$ ]]; then
+        # Same preference as run_owiki: PYTHONPATH into this checkout over a
+        # possibly-older installed binary. If this checkout is later moved or
+        # deleted, re-run setup.sh (or edit the crontab) to point it elsewhere.
+        SYNC_CMD="$(command -v python3 &>/dev/null && echo "env PYTHONPATH=$SCRIPT_DIR python3 -m obsidian_wiki.cli sync" || echo "obsidian-wiki sync")"
+        CRON_LINE="0 * * * * $SYNC_CMD --vault $VAULT_PATH >> $GLOBAL_CONFIG_DIR/sync.log 2>&1"
+        ( crontab -l 2>/dev/null; echo "$CRON_LINE" ) | sort -u | crontab -
+        echo "✅  Hourly cron installed  (logs: $GLOBAL_CONFIG_DIR/sync.log)"
+      fi
     fi
   fi
 fi
@@ -303,11 +297,12 @@ echo "────────────────────────�
 echo " Setup complete!"
 echo ""
 echo " Skills found:    $SKILL_COUNT"
+echo " Writing profile:  $WRITING_PROFILE"
 echo " Agents ready:    Claude Code, Cursor, Windsurf, Gemini CLI, Antigravity,"
 echo "                  Codex, Hermes, OpenClaw, OpenCode, Aider, Factory Droid,"
 echo "                  Trae, Trae CN, Kiro, Pi, GitHub Copilot (CLI + VS Code Chat)"
 if $SYNC_CONFIGURED; then
-echo " GitHub sync:     wiki-sync  (script: ~/.obsidian-wiki/sync.sh)"
+echo " GitHub sync:     wiki-sync  (obsidian-wiki sync)"
 fi
 echo ""
 echo " Bootstrap files:"
@@ -329,6 +324,7 @@ echo ""
 echo " From any other project:"
 echo "   /wiki-update    → sync knowledge into your vault"
 echo "   /wiki-query     → ask questions against your wiki"
+echo "   /wiki-context-pack → compile bounded context for another agent"
 if $SYNC_CONFIGURED; then
 echo "   wiki-sync       → push all vault changes to GitHub"
 fi
